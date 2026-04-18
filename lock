@@ -1,0 +1,300 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- SETTINGS
+local TOGGLE_KEY = Enum.KeyCode.C
+local SWITCH_LEFT = Enum.KeyCode.Z
+local SWITCH_RIGHT = Enum.KeyCode.X
+
+local MAX_DISTANCE = 200
+local FOV_RADIUS = 150
+local TEAM_CHECK = true
+
+local CAMERA_OFFSET = Vector3.new(2, 1.5, 6)
+local ZOOM = 60
+
+-- STATE
+local lockOn = false
+local currentTarget = nil
+local targets = {}
+
+-- UI STATE
+local currentHighlight, currentBillboard
+local currentRingModel, ringConnection
+
+-- GET ROOT
+local function getRoot(model)
+	return model and model:FindFirstChild("HumanoidRootPart")
+end
+
+local function isCharacter(model)
+	local hum = model and model:FindFirstChildOfClass("Humanoid")
+	return hum and hum.Health > 0
+end
+
+-- VALID TARGET
+local function isValidTarget(model)
+	if not isCharacter(model) then return false end
+	if model == LocalPlayer.Character then return false end
+
+	local player = Players:GetPlayerFromCharacter(model)
+	if TEAM_CHECK and player and player.Team == LocalPlayer.Team then return false end
+
+	local root = getRoot(model)
+	if not root then return false end
+
+	return (root.Position - Camera.CFrame.Position).Magnitude <= MAX_DISTANCE
+end
+
+-- UPDATE TARGETS
+local function updateTargets()
+	targets = {}
+
+	for _, p in pairs(Players:GetPlayers()) do
+		if isValidTarget(p.Character) then
+			table.insert(targets, p.Character)
+		end
+	end
+
+	for _, obj in pairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") and not Players:GetPlayerFromCharacter(obj) then
+			if isValidTarget(obj) then
+				table.insert(targets, obj)
+			end
+		end
+	end
+end
+
+-- CLOSEST TARGET (FOV BASED)
+local function getClosestTarget()
+	local closest, shortest = nil, math.huge
+
+	for _, model in pairs(targets) do
+		local root = getRoot(model)
+		if root then
+			local pos, visible = Camera:WorldToViewportPoint(root.Position)
+			if visible then
+				local dist = (Vector2.new(pos.X, pos.Y) - Camera.ViewportSize/2).Magnitude
+				if dist < shortest and dist <= FOV_RADIUS then
+					shortest = dist
+					closest = model
+				end
+			end
+		end
+	end
+
+	return closest
+end
+
+-- CLEAR UI
+local function clearUI()
+	if currentHighlight then currentHighlight:Destroy() end
+	if currentBillboard then currentBillboard:Destroy() end
+	if currentRingModel then currentRingModel:Destroy() end
+	if ringConnection then ringConnection:Disconnect() end
+
+	currentHighlight, currentBillboard = nil, nil
+	currentRingModel, ringConnection = nil, nil
+end
+
+-- CREATE UI
+local function createUI(target)
+	clearUI()
+	if not target then return end
+
+	-- Highlight
+	local hl = Instance.new("Highlight")
+	hl.FillTransparency = 1
+	hl.OutlineColor = Color3.fromRGB(255,60,60)
+	hl.Parent = target
+	currentHighlight = hl
+
+	-- HP Billboard
+	local head = target:FindFirstChild("Head")
+	if head then
+		local bill = Instance.new("BillboardGui")
+		bill.Size = UDim2.new(0,100,0,40)
+		bill.StudsOffset = Vector3.new(0,3,0)
+		bill.AlwaysOnTop = true
+		bill.Parent = head
+
+		local txt = Instance.new("TextLabel")
+		txt.Size = UDim2.new(1,0,1,0)
+		txt.BackgroundTransparency = 1
+		txt.TextScaled = true
+		txt.TextStrokeTransparency = 0
+		txt.TextColor3 = Color3.new(1,1,1)
+		txt.Parent = bill
+
+		local hum = target:FindFirstChildOfClass("Humanoid")
+		RunService.RenderStepped:Connect(function()
+			if currentTarget == target and hum then
+				txt.Text = math.floor(hum.Health).." HP"
+			end
+		end)
+
+		currentBillboard = bill
+	end
+
+	-- LOCK RING (SBG STYLE)
+	local root = getRoot(target)
+	if root then
+		local model = Instance.new("Model", workspace)
+
+		local function makeRing(size, transparency)
+			local part = Instance.new("Part")
+			part.Shape = Enum.PartType.Cylinder
+			part.Size = Vector3.new(0.2, size, size)
+			part.Anchored = true
+			part.CanCollide = false
+			part.Material = Enum.Material.Neon
+			part.Color = Color3.fromRGB(255,60,60)
+			part.Transparency = transparency
+			part.Parent = model
+			return part
+		end
+
+		local inner = makeRing(4, 0.2)
+		local outer = makeRing(6, 0.4)
+
+		currentRingModel = model
+
+		local r1, r2, pulse = 0, 0, 0
+
+		ringConnection = RunService.RenderStepped:Connect(function(dt)
+			if currentTarget ~= target then return end
+
+			local bob = math.sin(tick()*3)*0.2
+			local pos = root.Position - Vector3.new(0, root.Size.Y/2 - bob, 0)
+
+			r1 += dt*120
+			r2 -= dt*90
+			pulse += dt*3
+			local scale = 1 + math.sin(pulse)*0.1
+
+			inner.Size = Vector3.new(0.2,4*scale,4*scale)
+			outer.Size = Vector3.new(0.2,6*scale,6*scale)
+
+			inner.CFrame = CFrame.new(pos)*CFrame.Angles(math.rad(90),0,math.rad(r1))
+			outer.CFrame = CFrame.new(pos)*CFrame.Angles(math.rad(90),0,math.rad(r2))
+		end)
+	end
+end
+
+-- SWITCH TARGET
+local function switchTarget(dir)
+	if #targets == 0 or not currentTarget then return end
+	local i = table.find(targets, currentTarget)
+	if not i then return end
+
+	i += dir
+	if i > #targets then i = 1 end
+	if i < 1 then i = #targets end
+
+	currentTarget = targets[i]
+	createUI(currentTarget)
+end
+
+-- TOGGLE
+local function toggleLock()
+	lockOn = not lockOn
+
+	if lockOn then
+		updateTargets()
+		currentTarget = getClosestTarget()
+		createUI(currentTarget)
+	else
+		currentTarget = nil
+		clearUI()
+	end
+end
+
+-- INPUT (PC)
+UserInputService.InputBegan:Connect(function(input,gp)
+	if gp then return end
+
+	if input.KeyCode == TOGGLE_KEY then
+		toggleLock()
+	elseif lockOn and input.KeyCode == SWITCH_LEFT then
+		switchTarget(-1)
+	elseif lockOn and input.KeyCode == SWITCH_RIGHT then
+		switchTarget(1)
+	end
+end)
+
+-- CONTROLLER
+ContextActionService:BindAction("ToggleLock", function(_,s)
+	if s==Enum.UserInputState.Begin then toggleLock() end
+end,false,Enum.KeyCode.ButtonX)
+
+ContextActionService:BindAction("SwitchL", function(_,s)
+	if s==Enum.UserInputState.Begin then switchTarget(-1) end
+end,false,Enum.KeyCode.DPadLeft)
+
+ContextActionService:BindAction("SwitchR", function(_,s)
+	if s==Enum.UserInputState.Begin then switchTarget(1) end
+end,false,Enum.KeyCode.DPadRight)
+
+-- MOBILE UI + SWIPE
+if UserInputService.TouchEnabled then
+	local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+
+	local btn = Instance.new("TextButton", gui)
+	btn.Size = UDim2.new(0,100,0,50)
+	btn.Position = UDim2.new(1,-110,1,-150)
+	btn.Text = "LOCK"
+	btn.MouseButton1Click:Connect(toggleLock)
+
+	local startPos
+	UserInputService.TouchStarted:Connect(function(t) startPos=t.Position end)
+	UserInputService.TouchEnded:Connect(function(t)
+		if not lockOn or not startPos then return end
+		local d=t.Position-startPos
+		if math.abs(d.X)>50 then
+			switchTarget(d.X>0 and 1 or -1)
+		end
+	end)
+end
+
+-- FOV CIRCLE
+local fov = Drawing.new("Circle")
+fov.Radius = FOV_RADIUS
+fov.Thickness = 2
+fov.Filled = false
+fov.Visible = true
+
+-- MAIN LOOP
+RunService.RenderStepped:Connect(function()
+	fov.Position = Camera.ViewportSize/2
+
+	if not lockOn then return end
+
+	updateTargets()
+
+	if not currentTarget or not isValidTarget(currentTarget) then
+		currentTarget = getClosestTarget()
+		createUI(currentTarget)
+	end
+
+	local targetRoot = getRoot(currentTarget)
+	local char = LocalPlayer.Character
+	local myRoot = getRoot(char)
+	if not targetRoot or not myRoot then return end
+
+	local dir = (targetRoot.Position - myRoot.Position).Unit
+	local offset = (CFrame.new(Vector3.new(), dir)*CFrame.new(CAMERA_OFFSET)).Position
+
+	local camPos = myRoot.Position + offset
+	local desired = CFrame.new(camPos, targetRoot.Position)
+
+	Camera.CFrame = Camera.CFrame:Lerp(desired, 0.25)
+	Camera.FieldOfView += (ZOOM - Camera.FieldOfView)*0.1
+
+	local flat = Vector3.new(targetRoot.Position.X, myRoot.Position.Y, targetRoot.Position.Z)
+	myRoot.CFrame = CFrame.new(myRoot.Position, flat)
+end)
